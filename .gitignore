@@ -1,0 +1,8 @@
+/bin/
+/ledger
+/loadtest
+*.test
+*.out
+coverage.*
+.env
+.DS_Store
