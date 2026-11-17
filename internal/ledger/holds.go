@@ -91,10 +91,20 @@ func (s *Service) AuthorizeHoldTx(ctx context.Context, tx pgx.Tx, req AuthorizeH
 	if err := writeAccounts(ctx, tx, accounts); err != nil {
 		return nil, err
 	}
-	return scanHold(tx.QueryRow(ctx,
+	return withEvent(ctx, tx, EventHoldAuthorized)(scanHold(tx.QueryRow(ctx,
 		`INSERT INTO holds (account_id, destination_account_id, currency, amount, description, metadata, expires_at)
 		 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7) RETURNING `+holdColumns,
-		src.ID, dst.ID, src.Currency, req.Amount, req.Description, meta, s.now().Add(ttl)))
+		src.ID, dst.ID, src.Currency, req.Amount, req.Description, meta, s.now().Add(ttl))))
+}
+
+// withEvent emits an event for a hold that was just written.
+func withEvent(ctx context.Context, tx pgx.Tx, eventType string) func(*Hold, error) (*Hold, error) {
+	return func(h *Hold, err error) (*Hold, error) {
+		if err != nil {
+			return nil, err
+		}
+		return h, emit(ctx, tx, eventType, h.ID, h)
+	}
 }
 
 // AuthorizeHold creates a hold in its own transaction.
@@ -180,9 +190,9 @@ func (s *Service) CaptureHoldTx(ctx context.Context, tx pgx.Tx, id string, req C
 	if err != nil {
 		return nil, err
 	}
-	return scanHold(tx.QueryRow(ctx,
+	return withEvent(ctx, tx, EventHoldCaptured)(scanHold(tx.QueryRow(ctx,
 		`UPDATE holds SET status = 'captured', captured_amount = $2, transaction_id = $3::uuid, updated_at = now()
-		 WHERE id = $1::uuid RETURNING `+holdColumns, h.ID, amount, t.ID))
+		 WHERE id = $1::uuid RETURNING `+holdColumns, h.ID, amount, t.ID)))
 }
 
 // CaptureHold captures a hold in its own transaction.
@@ -214,8 +224,8 @@ func (s *Service) VoidHoldTx(ctx context.Context, tx pgx.Tx, id string) (*Hold, 
 	if err := writeAccounts(ctx, tx, accounts); err != nil {
 		return nil, err
 	}
-	return scanHold(tx.QueryRow(ctx,
-		`UPDATE holds SET status = 'voided', updated_at = now() WHERE id = $1::uuid RETURNING `+holdColumns, h.ID))
+	return withEvent(ctx, tx, EventHoldVoided)(scanHold(tx.QueryRow(ctx,
+		`UPDATE holds SET status = 'voided', updated_at = now() WHERE id = $1::uuid RETURNING `+holdColumns, h.ID)))
 }
 
 // VoidHold voids a hold in its own transaction.
@@ -284,11 +294,30 @@ func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
 		if err := writeAccounts(ctx, tx, accounts); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE holds SET status = 'expired', updated_at = now() WHERE id = ANY($1::uuid[])`, ids); err != nil {
+		updated, err := tx.Query(ctx,
+			`UPDATE holds SET status = 'expired', updated_at = now() WHERE id = ANY($1::uuid[]) RETURNING `+holdColumns, ids)
+		if err != nil {
 			return err
 		}
-		expired = len(ids)
+		var changed []*Hold
+		for updated.Next() {
+			h, err := scanHold(updated)
+			if err != nil {
+				updated.Close()
+				return err
+			}
+			changed = append(changed, h)
+		}
+		updated.Close()
+		if err := updated.Err(); err != nil {
+			return err
+		}
+		for _, h := range changed {
+			if err := emit(ctx, tx, EventHoldExpired, h.ID, h); err != nil {
+				return err
+			}
+		}
+		expired = len(changed)
 		return nil
 	})
 	return expired, err

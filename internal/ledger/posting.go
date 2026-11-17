@@ -183,7 +183,7 @@ func (s *Service) post(ctx context.Context, tx pgx.Tx, accounts map[string]*lock
 	if err := writeAccounts(ctx, tx, accounts); err != nil {
 		return nil, err
 	}
-	return &t, nil
+	return &t, emit(ctx, tx, EventTransactionPosted, t.ID, &t)
 }
 
 func scanEntries(rows pgx.Rows) ([]Entry, error) {

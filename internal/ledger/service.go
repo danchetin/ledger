@@ -183,10 +183,14 @@ func (s *Service) CreateAccountTx(ctx context.Context, tx pgx.Tx, req CreateAcco
 	if err != nil {
 		return nil, err
 	}
-	return scanAccount(tx.QueryRow(ctx,
+	a, err := scanAccount(tx.QueryRow(ctx,
 		`INSERT INTO accounts (name, currency, allow_overdraft, metadata)
 		 VALUES ($1, $2, $3, $4::jsonb) RETURNING `+accountColumns,
 		name, req.Currency, req.AllowOverdraft, meta))
+	if err != nil {
+		return nil, err
+	}
+	return a, emit(ctx, tx, EventAccountCreated, a.ID, a)
 }
 
 // CreateAccount creates an account in its own transaction.

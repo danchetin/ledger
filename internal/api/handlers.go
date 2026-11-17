@@ -307,6 +307,20 @@ func (s *Server) voidHold(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
+	events, next, err := s.svc.ListEvents(r.Context(), r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page[ledger.Event]{Data: events, NextCursor: next})
+}
+
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 	report, err := s.svc.Reconcile(r.Context())
 	if err != nil {

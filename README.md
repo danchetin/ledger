@@ -4,7 +4,8 @@
 
 A double-entry ledger service in Go on PostgreSQL: accounts, multi-leg transfers,
 holds (authorize / capture / void / expire), reversals, idempotent writes, account
-statements and a reconciliation check that re-derives every balance from the journal.
+statements, a transactional outbox feed of events, and a reconciliation check that
+re-derives every balance from the journal.
 
 The point of the project is correctness under concurrency. Money is never created or
 lost, an account without overdraft never goes negative, a retried request never posts
@@ -19,9 +20,10 @@ client ──HTTP──► api (Idempotency-Key, validation, errors, metrics)
                 ledger service ── one DB transaction per request ──► PostgreSQL
                   │   lock accounts in id order (SELECT … FOR UPDATE)     │
                   │   check balances, post entries, update balances       ├─ CHECK / FK constraints
-                  │   store idempotent response                           ├─ deferred "sum = 0" trigger
+                  │   write outbox event, store idempotent response       ├─ deferred "sum = 0" trigger
                   ▼                                                       └─ append-only triggers
                 reconcile (read-only snapshot: journal vs balances)
+                events feed (committed changes, never skipped, cursor-based)
 ```
 
 ## Quick start
@@ -35,6 +37,7 @@ docker compose up --build        # API on :8080 + PostgreSQL, migrations run on 
 curl -s localhost:8080/v1/accounts -d '{"name":"world","currency":"USD","allow_overdraft":true}'
 curl -s localhost:8080/v1/accounts -d '{"name":"alice","currency":"USD"}'
 curl -s localhost:8080/v1/accounts -d '{"name":"bob","currency":"USD"}'
+curl -s localhost:8080/v1/accounts -d '{"name":"fees","currency":"USD"}'
 
 # Transfers move integer minor units (cents) and require an Idempotency-Key.
 curl -s localhost:8080/v1/transfers -H 'Idempotency-Key: deposit-1' \
@@ -72,6 +75,7 @@ also served at `GET /openapi.yaml`.
 | `POST /v1/holds` | Authorize: reserve money until capture, void or expiry |
 | `POST /v1/holds/{id}/capture` | Capture all or part; the remainder is released |
 | `POST /v1/holds/{id}/void` | Release the reservation |
+| `GET /v1/events` | Outbox feed of committed changes, cursor-based |
 | `GET /v1/reconcile` | Re-derive balances from the journal and report mismatches |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness, readiness (DB ping), Prometheus |
 
@@ -162,8 +166,24 @@ insufficient funds) are stored and replayed too, after a `SAVEPOINT` rollback re
 any partial effects; internal errors roll back the key as well, so the client can retry.
 Keys are purged after `IDEMPOTENCY_TTL`.
 
-**PostgreSQL only.** No Redis or queue: locks, idempotency, expiry and invariants all
-live in one transactional store, which keeps every guarantee atomic.
+**Outbox feed that never skips.** Every change (`account.created`,
+`transaction.posted`, `hold.authorized|captured|voided|expired`) writes an event row in
+the same database transaction, so an event exists if and only if the change committed.
+Consumers poll `GET /v1/events?cursor=…` and store the cursor after processing
+(at-least-once).
+
+The subtle part is the cursor. Paging by `id` loses events: ids are assigned at
+`INSERT`, but transactions commit in a different order, so a reader can move past id 41
+while the transaction holding id 40 is still open, and never see it. Each event therefore
+stores its writer's transaction id (`xid8`), the feed is ordered by `(tx_id, id)`, and a
+read only returns events from transactions older than every transaction still running
+(`tx_id < pg_snapshot_xmin(pg_current_snapshot())`). Anything that commits later sorts
+after the returned cursor. A test runs writers that hold transactions open after writing,
+with this feed and a naive id-cursor reader side by side: the feed delivered all 480
+events exactly once in every run, the naive reader lost 67-78 of them.
+
+**PostgreSQL only.** No Redis or queue: locks, idempotency, expiry, events and
+invariants all live in one transactional store, which keeps every guarantee atomic.
 
 ## Performance
 
@@ -173,18 +193,23 @@ and a full reconciliation (both passed in every run, with zero 5xx).
 
 | Clients | Transfers/s | p50 | p95 | p99 |
 |---:|---:|---:|---:|---:|
-| 8 | 1,867 | 3.7 ms | 7.2 ms | 10.8 ms |
-| 32 | 2,825 | 9.1 ms | 22.9 ms | 35.8 ms |
-| 64 | 2,708 | 21.0 ms | 37.2 ms | 66.9 ms |
+| 8 | 1,722 | 4.2 ms | 7.7 ms | 10.5 ms |
+| 32 | 2,341 | 10.4 ms | 27.4 ms | 49.8 ms |
+| 64 | 2,351 | 23.0 ms | 43.2 ms | 129.0 ms |
 
 Setup: one Apple M4 (10 cores, 16 GB) running the load generator, the service
 (`DB_MAX_CONNS=32`) and PostgreSQL 16 in Docker (OrbStack) with durable settings
-(`fsync=on`, `synchronous_commit=on`). Throughput levels off around 32 clients, where
-the connection pool and commit latency are the limit; more clients only add queueing.
+(`fsync=on`, `synchronous_commit=on`), 30 s per run, on one database that grew to about
+400k entries across the runs. Throughput levels off around 32 clients, where the
+connection pool and commit latency are the limit; more clients only add queueing.
+Each transfer is one HTTP request and one database transaction: idempotency key,
+two row locks, transaction, two entries, balance update, outbox event, stored response.
+Writing the outbox event costs about 17%: the same 32-client run did 2,825 transfers/s
+before the feed existed.
 
 Contention: when half of all transfers involve the same account (`-hot 0.5`), requests
-on that account serialize on its row lock. The service still handled 2,415 requests/s,
-p99 grew to 77 ms, and the books stayed exact. A production system with a very hot
+on that account serialize on its row lock. The service still handled 2,021 requests/s,
+p99 grew to 106 ms, and the books stayed exact. A production system with a very hot
 account (a platform fee account, say) would split it into several sub-accounts; this
 project does not do that.
 
@@ -210,6 +235,8 @@ They cover, among others:
 - **Model-based test:** a random sequence of transfers, multi-leg transfers, holds,
   captures, voids and reversals; after every step the database must equal a simple
   in-memory model. The seed is logged; replay with `LEDGER_PROPERTY_SEED=<seed>`.
+- **Event feed:** 12 writers, some holding transactions open after writing, while a
+  consumer follows the cursor: every transaction's event arrives exactly once.
 - **Database guards:** unbalanced, wrong-currency, overdrawn and edited rows written
   with raw SQL are rejected by PostgreSQL itself.
 - **HTTP:** full flow, error mapping, auth, metrics labels, pagination.
@@ -248,7 +275,10 @@ internal/testdb     per-test database helper
 - No currency conversion rates: an exchange is expressed as a four-leg transaction, the
   rate is the caller's business.
 - Hot accounts are not sharded (see Performance).
-- No outbox or event stream for downstream consumers yet.
+- Events are pulled by polling; there are no webhooks or push delivery, and the events
+  table is never pruned.
+- A long-running transaction anywhere in the database holds back the event feed (by
+  design: its events might still commit), so keep transactions short.
 - Reconciliation scans everything; fine for this scale, a real system would do it
   incrementally.
 - Append-only triggers stop `UPDATE` and `DELETE`, not `TRUNCATE` or a superuser.

@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/holds/{id}", s.getHold)
 	mux.HandleFunc("POST /v1/holds/{id}/capture", s.captureHold)
 	mux.HandleFunc("POST /v1/holds/{id}/void", s.voidHold)
+	mux.HandleFunc("GET /v1/events", s.listEvents)
 	mux.HandleFunc("GET /v1/reconcile", s.reconcile)
 
 	return s.recoverer(s.requestID(s.observe(mux, s.auth(mux))))

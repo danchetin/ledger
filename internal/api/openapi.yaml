@@ -167,6 +167,30 @@ paths:
       responses:
         '200': { description: Voided, content: { application/json: { schema: { $ref: '#/components/schemas/Hold' } } } }
         '409': { $ref: '#/components/responses/Error' }
+  /v1/events:
+    get:
+      tags: [operations]
+      summary: Outbox feed of committed changes
+      description: |
+        Events are written in the same database transaction as the change they
+        describe. Poll with `next_cursor`; an empty page means you are caught up and
+        should poll again later with the same cursor. Persist the cursor after
+        processing for at-least-once delivery. The feed never skips an event, even
+        when transactions commit out of order.
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: cursor, in: query, schema: { type: string }, description: next_cursor from the previous page; omit to start from the beginning }
+      responses:
+        '200':
+          description: A page of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Event' } }
+                  next_cursor: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
   /v1/reconcile:
     get:
       tags: [operations]
@@ -299,6 +323,15 @@ components:
         transaction_id: { type: [string, 'null'], format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    Event:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        type: { type: string, enum: [account.created, transaction.posted, hold.authorized, hold.captured, hold.voided, hold.expired] }
+        resource_id: { type: string, format: uuid }
+        payload: { type: object, description: The account, transaction or hold as returned by the API }
+        created_at: { type: string, format: date-time }
+        cursor: { type: string }
     ReconcileReport:
       type: object
       properties:

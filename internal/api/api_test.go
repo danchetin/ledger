@@ -171,6 +171,22 @@ func TestHTTPFlow(t *testing.T) {
 	if !report.OK {
 		t.Fatalf("reconcile: %+v", report)
 	}
+
+	var events struct {
+		Data       []ledger.Event `json:"data"`
+		NextCursor string         `json:"next_cursor"`
+	}
+	c.expect(200, c.do("GET", "/v1/events?limit=500", "", nil)).decode(t, &events)
+	// 3 accounts, deposit, payment, reversal, hold authorized, capture posted, hold captured.
+	// Replays and failed requests added nothing.
+	if len(events.Data) != 9 || events.Data[len(events.Data)-1].Type != "hold.captured" {
+		t.Fatalf("events = %+v", events.Data)
+	}
+	c.expect(200, c.do("GET", "/v1/events?cursor="+events.NextCursor, "", nil)).decode(t, &events)
+	if len(events.Data) != 0 {
+		t.Fatalf("events after head = %+v", events.Data)
+	}
+	c.expect(400, c.do("GET", "/v1/events?cursor=nope", "", nil))
 }
 
 func TestHTTPErrors(t *testing.T) {
