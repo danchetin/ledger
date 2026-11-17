@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger"]
+      interval: 2s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ledger:
+    build: .
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      LEDGER_API_KEY: ${LEDGER_API_KEY:-}
+      SWEEP_INTERVAL: 10s
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
