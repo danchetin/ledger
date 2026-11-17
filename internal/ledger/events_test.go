@@ -14,20 +14,30 @@ import (
 	"github.com/danchetin/ledger/internal/ledger"
 )
 
-func (f *fixture) allEvents(cursor string) ([]ledger.Event, string) {
+// waitEvents follows the feed from cursor until it has collected n events.
+//
+// The feed deliberately holds back events while any older transaction in the
+// PostgreSQL cluster is still open (tests in other packages run against the same
+// server in parallel), so a consumer has to poll rather than expect them at once.
+func (f *fixture) waitEvents(cursor string, n int) ([]ledger.Event, string) {
 	f.t.Helper()
 	var out []ledger.Event
-	for {
+	deadline := time.Now().Add(15 * time.Second)
+	for len(out) < n {
+		if time.Now().After(deadline) {
+			f.t.Fatalf("got %d events, want %d", len(out), n)
+		}
 		page, next, err := f.svc.ListEvents(f.ctx, cursor, 2)
 		if err != nil {
 			f.t.Fatalf("list events: %v", err)
 		}
 		out = append(out, page...)
-		if len(page) == 0 {
-			return out, next
-		}
 		cursor = next
+		if len(page) == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
+	return out, cursor
 }
 
 func TestEventsDescribeCommittedChangesInOrder(t *testing.T) {
@@ -46,7 +56,7 @@ func TestEventsDescribeCommittedChangesInOrder(t *testing.T) {
 	_, err = f.svc.Transfer(f.ctx, ledger.TransferRequest{FromAccountID: bob.ID, ToAccountID: alice.ID, Amount: 10_000})
 	requireCode(t, err, ledger.CodeInsufficientFunds)
 
-	events, cursor := f.allEvents("")
+	events, cursor := f.waitEvents("", 8)
 	var types []string
 	for _, e := range events {
 		types = append(types, e.Type)
@@ -74,7 +84,7 @@ func TestEventsDescribeCommittedChangesInOrder(t *testing.T) {
 		t.Fatalf("poll at head: %d events, next %q (want %q), err %v", len(page), next, cursor, err)
 	}
 	f.transfer(alice.ID, bob.ID, 1)
-	page, _, _ = f.svc.ListEvents(f.ctx, cursor, 10)
+	page, _ = f.waitEvents(cursor, 1)
 	if len(page) != 1 || page[0].Type != "transaction.posted" {
 		t.Fatalf("new event after cursor = %+v", page)
 	}
@@ -94,9 +104,12 @@ func TestEventFeedNeverSkipsUnderConcurrency(t *testing.T) {
 	for i := range accounts {
 		accounts[i] = f.funded("acc", "USD", 1_000_000)
 	}
-	_, startCursor := f.allEvents("")
+	// 1 world account + nAccounts accounts + nAccounts funding transfers so far.
+	_, startCursor := f.waitEvents("", 1+2*nAccounts)
 
 	var done atomic.Bool
+	var expected atomic.Int64 // set once the writers finish
+	expected.Store(-1)
 	var wg sync.WaitGroup
 	for w := 0; w < 12; w++ {
 		wg.Add(1)
@@ -127,8 +140,17 @@ func TestEventFeedNeverSkipsUnderConcurrency(t *testing.T) {
 	seen := map[string]int{}
 	consume := func() {
 		cursor := startCursor
+		received := 0
+		var deadline time.Time
 		for {
-			finished := done.Load()
+			if want := expected.Load(); want >= 0 {
+				if deadline.IsZero() {
+					deadline = time.Now().Add(15 * time.Second)
+				}
+				if int64(received) >= want || time.Now().After(deadline) {
+					return
+				}
+			}
 			page, next, err := f.svc.ListEvents(context.Background(), cursor, 37)
 			if err != nil {
 				t.Errorf("list events: %v", err)
@@ -136,11 +158,9 @@ func TestEventFeedNeverSkipsUnderConcurrency(t *testing.T) {
 			}
 			for _, e := range page {
 				seen[e.ResourceID]++
+				received++
 			}
 			cursor = next
-			if finished && len(page) == 0 {
-				return
-			}
 			time.Sleep(time.Millisecond)
 		}
 	}
@@ -178,9 +198,6 @@ func TestEventFeedNeverSkipsUnderConcurrency(t *testing.T) {
 	go func() { naive(); close(naiveDone) }()
 	wg.Wait()
 	done.Store(true)
-	<-consumerDone
-	<-naiveDone
-
 	rows, err := f.svc.Pool().Query(f.ctx, `SELECT id::text FROM transactions`)
 	if err != nil {
 		t.Fatal(err)
@@ -189,6 +206,9 @@ func TestEventFeedNeverSkipsUnderConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expected.Store(int64(len(ids) - nAccounts))
+	<-consumerDone
+	<-naiveDone
 	missing := 0
 	for _, id := range ids {
 		if seen[id] == 0 {

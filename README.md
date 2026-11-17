@@ -277,8 +277,10 @@ internal/testdb     per-test database helper
 - Hot accounts are not sharded (see Performance).
 - Events are pulled by polling; there are no webhooks or push delivery, and the events
   table is never pruned.
-- A long-running transaction anywhere in the database holds back the event feed (by
-  design: its events might still commit), so keep transactions short.
+- A long-running transaction anywhere on the PostgreSQL server, even in another
+  database, holds back the event feed until it ends (transaction ids are cluster-wide,
+  and its events might still commit). Keep transactions short; the tests poll the feed
+  for this reason, since test packages run against one server in parallel.
 - Reconciliation scans everything; fine for this scale, a real system would do it
   incrementally.
 - Append-only triggers stop `UPDATE` and `DELETE`, not `TRUNCATE` or a superuser.

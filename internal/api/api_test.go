@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/danchetin/ledger/internal/api"
 	"github.com/danchetin/ledger/internal/ledger"
@@ -176,7 +177,14 @@ func TestHTTPFlow(t *testing.T) {
 		Data       []ledger.Event `json:"data"`
 		NextCursor string         `json:"next_cursor"`
 	}
-	c.expect(200, c.do("GET", "/v1/events?limit=500", "", nil)).decode(t, &events)
+	// The feed holds events back while older transactions anywhere on the server are
+	// open (other test packages run in parallel), so poll briefly.
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		c.expect(200, c.do("GET", "/v1/events?limit=500", "", nil)).decode(t, &events)
+		if len(events.Data) >= 9 {
+			break
+		}
+	}
 	// 3 accounts, deposit, payment, reversal, hold authorized, capture posted, hold captured.
 	// Replays and failed requests added nothing.
 	if len(events.Data) != 9 || events.Data[len(events.Data)-1].Type != "hold.captured" {
