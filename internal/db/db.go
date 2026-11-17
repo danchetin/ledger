@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,6 +31,7 @@ func Open(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, error
 	if maxConns > 0 {
 		cfg.MaxConns = maxConns
 	}
+	Configure(cfg)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
@@ -38,6 +41,18 @@ func Open(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, error
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return pool, nil
+}
+
+// Configure makes every connection return timestamps in UTC, whatever the
+// server or host time zone is, so API responses are stable.
+func Configure(cfg *pgxpool.Config) {
+	cfg.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		conn.TypeMap().RegisterType(&pgtype.Type{
+			Name: "timestamptz", OID: pgtype.TimestamptzOID,
+			Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+		})
+		return nil
+	}
 }
 
 // Migrate applies every migration that has not been applied yet, each in its own

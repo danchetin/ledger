@@ -42,6 +42,7 @@ func New(t testing.TB) *pgxpool.Pool {
 	}
 	cfg.ConnConfig.Database = name
 	cfg.MaxConns = 64
+	db.Configure(cfg)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
