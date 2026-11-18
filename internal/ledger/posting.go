@@ -296,14 +296,6 @@ func (s *Service) ReverseTx(ctx context.Context, tx pgx.Tx, id string, req Rever
 	if orig.Kind == "reversal" {
 		return nil, errorf(CodeValidation, "a reversal cannot be reversed")
 	}
-	var reversed bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM transactions WHERE reverses_id = $1::uuid)`, id).
-		Scan(&reversed); err != nil {
-		return nil, err
-	}
-	if reversed {
-		return nil, errorf(CodeAlreadyReversed, "transaction %s is already reversed", id)
-	}
 	legs := make([]Leg, len(orig.Entries))
 	for i, e := range orig.Entries {
 		legs[i] = Leg{AccountID: e.AccountID, Amount: -e.Amount}
@@ -311,6 +303,19 @@ func (s *Service) ReverseTx(ctx context.Context, tx pgx.Tx, id string, req Rever
 	accounts, err := lockAccounts(ctx, tx, legAccountIDs(legs))
 	if err != nil {
 		return nil, err
+	}
+	// Check only after the locks: a concurrent reversal of the same transaction
+	// locks the same accounts, so by now it has either committed (and this query
+	// sees it) or not started. Checking earlier would let us wait for its locks and
+	// then fail with a misleading insufficient_funds. The unique index on
+	// reverses_id remains the final guard.
+	var reversed bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM transactions WHERE reverses_id = $1::uuid)`, id).
+		Scan(&reversed); err != nil {
+		return nil, err
+	}
+	if reversed {
+		return nil, errorf(CodeAlreadyReversed, "transaction %s is already reversed", id)
 	}
 	description := req.Description
 	if description == "" {

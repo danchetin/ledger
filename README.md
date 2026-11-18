@@ -243,6 +243,15 @@ They cover, among others:
 
 Coverage of `internal/...` is about 78%.
 
+One bug these tests caught: the first CI run, on a slower 2-core runner, failed the
+concurrent-reversal test. A second reversal of the same transaction checked "already
+reversed?" before taking the account locks, then waited for the first reversal's locks,
+and by the time it got them the money was gone, so it answered `insufficient_funds`
+instead of `already_reversed`. The books were never wrong (the unique index on
+`reverses_id` stops a double reversal), but the client got a misleading error. The check
+now runs after the locks are held. On a 10-core laptop the race showed up about once in
+15 runs with `GOMAXPROCS=2` and never with default settings.
+
 ## Configuration
 
 | Variable | Default | Meaning |
