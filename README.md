@@ -243,8 +243,8 @@ They cover, among others:
 
 Coverage of `internal/...` is about 78%.
 
-One bug these tests caught: the first CI run, on a slower 2-core runner, failed the
-concurrent-reversal test. A second reversal of the same transaction checked "already
+One bug these tests caught: the first CI run, on a GitHub Actions runner slower than my
+laptop, failed the concurrent-reversal test. A second reversal of the same transaction checked "already
 reversed?" before taking the account locks, then waited for the first reversal's locks,
 and by the time it got them the money was gone, so it answered `insufficient_funds`
 instead of `already_reversed`. The books were never wrong (the unique index on
